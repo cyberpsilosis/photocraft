@@ -58,11 +58,20 @@ the head commit. Rust stable 1.95 or newer (`rust-version` in `Cargo.toml`).
 - **The craft-fonts pass.** CI's Linux job runs the workspace tests once more
   with storytold/craft-fonts checked out at `abb83316` into `craft-fonts/`,
   `CRAFT_FONTS_DIR` pointing at it and `CRAFT_FONTS_REQUIRED=1`.
+- **Clippy on main.** With Rust 1.97.0, clippy stops on `main` (d836e34) at
+  two `manual_range_contains` hits in `photocraft-engine`'s test code
+  (`crates/engine/src/fill_cmds.rs:416`, `crates/engine/src/image_cmds.rs:625`)
+  and checks nothing after them. Run it on `main` and on the branch with the
+  same toolchain and compare: the branch adds no new hit.
 - `cargo xtask ci` runs fmt, clippy, the tests, layers and wasm in one go and
   stops at the first failure. `AGENTS.md` section 5 lists the extra checks by
   kind of change (`parity`, `panic_hunt`, `perf`, `scorecard`).
-- A cold build of the whole workspace takes a long time; parallel agents each
-  use their own `CARGO_TARGET_DIR` (AGENTS.md section 6).
+- **Disk.** On a harness machine (2026-11-21) the workspace test build with
+  CI's `line-tables-only` debug info and Cargo's incremental cache passed
+  27 GB and filled the disk. With `CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_INCREMENTAL=0` the target dir stayed at 6.2 GB and the tests passed in
+  12.5 minutes on 4 cores. Say in the pull request which settings you ran.
+  Parallel agents each use their own `CARGO_TARGET_DIR` (AGENTS.md section 6).
 
 ## How changes ship
 
