@@ -55,6 +55,9 @@ the head commit. Rust stable 1.95 or newer (`rust-version` in `Cargo.toml`).
   (`xtask/src/corpus_pins.rs`); `cargo xtask test-corpus` runs the tests
   behind the `corpus` feature. CI runs it with
   `CARGO_PROFILE_RELEASE_LTO=false` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`.
+  On a harness machine (2026-11-21) the fetch got PngSuite and then stopped:
+  `codeload.github.com` answered 403 for the psd-tools tarball. Where it
+  cannot fetch, say so in the pull request.
 - **The craft-fonts pass.** CI's Linux job runs the workspace tests once more
   with storytold/craft-fonts checked out at `abb83316` into `craft-fonts/`,
   `CRAFT_FONTS_DIR` pointing at it and `CRAFT_FONTS_REQUIRED=1`.
