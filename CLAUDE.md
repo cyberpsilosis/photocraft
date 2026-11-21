@@ -11,7 +11,8 @@ then `docs/`. This file adds what is particular to Elijah's copy.
 PhotoCraft is an open-source, clean-room reimplementation of Photoshop in
 Rust (README): a native desktop app (egui and eframe on wgpu), a headless
 command line, `photocraft-cli` (`convert`, `info`, `run`, `batch`,
-`commands`, `mcp`), and the same app compiled to WebAssembly. It is a Cargo
+`droplet`, `commands`, `mcp`, `serve`; `apps/photocraft-cli/src/lib.rs`), and
+the same app compiled to WebAssembly. It is a Cargo
 workspace: 24 crates in `crates/`, three apps in `apps/` and `xtask/`.
 `docs/` and the book in `book/` describe it.
 
@@ -31,9 +32,11 @@ getartcraft.com that the README names belong to the upstream. A merge to
 ## How to run it
 
 CI is `.github/workflows/ci.yml`, written for GitHub's hosted runners:
-`ubuntu-latest`, plus `macos-latest` and `windows-latest` on `main` and on a
-pull request that touches `apps/`, `ui-egui`, `text`, `gpu`, `tablet`,
-`heif`, a `build.rs` or `Cargo.lock`. **GitHub runs none of it on this fork.**
+`ubuntu-latest`, plus `macos-latest` and `windows-latest` on a push to `main`,
+on a manual run (`workflow_dispatch`, whose `fuzz` input also starts the fuzz
+job), on a pull request labelled `full-ci`, and on a pull request that touches
+`apps/`, `ui-egui`, `text`, `gpu`, `tablet`, `heif`, a `build.rs`,
+`Cargo.lock` or `ci.yml` itself (the `platforms` job). **GitHub runs none of it on this fork.**
 Its Actions list no workflows and no runs (checked 2026-11-21), and pull
 request #1 shows no checks. So the author runs the Linux job's steps and
 pastes their output in the pull request, and the reviewer runs them again on
@@ -56,8 +59,21 @@ the head commit. Rust stable 1.95 or newer (`rust-version` in `Cargo.toml`).
   behind the `corpus` feature. CI runs it with
   `CARGO_PROFILE_RELEASE_LTO=false` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`.
   On a harness machine (2026-11-21) the fetch got PngSuite and then stopped:
-  `codeload.github.com` answered 403 for the psd-tools tarball. Where it
-  cannot fetch, say so in the pull request.
+  `codeload.github.com` answered 403 for the psd-tools tarball.
+  `test-corpus` fetches every corpus first, and the corpus tests fail, not
+  skip, when theirs is missing (`cargo xtask corpus` with no flag lists each
+  as present or missing).
+- **When the corpus cannot be fetched.** Fetch what can be fetched one source
+  at a time (`cargo xtask corpus --pngsuite`, `--psd`, `--psd-tools`,
+  `--heif`, `--exr`), then list them with `cargo xtask corpus`. For each crate
+  the change touches, run its ordinary tests in release
+  (`cargo test --release -p <crate>`) and the corpus test files whose corpus
+  is present (`cargo test --release -p <crate> --features <crate>/corpus
+  --test <file>`, for example `-p photocraft-codecs --features
+  photocraft-codecs/corpus --test png_jpeg` on PngSuite). The author says in
+  the pull request, and the reviewer in the review, which corpora fetched,
+  which did not and what ran instead; a corpus that could not be fetched does
+  not by itself fail the review.
 - **The craft-fonts pass.** CI's Linux job runs the workspace tests once more
   with storytold/craft-fonts checked out at `abb83316` into `craft-fonts/`,
   `CRAFT_FONTS_DIR` pointing at it and `CRAFT_FONTS_REQUIRED=1`.
@@ -139,10 +155,15 @@ Each says how to meet it.
    from Photoshop or other proprietary software (code, shaders, profiles,
    icons); behaviour comes from public specs and observation. A third-party
    or original asset keeps its licence file beside it and gets a row in
-   `ATTRIBUTION.md` in the same change. The ArtCraft logos in `docs/brand/`
-   are not open source, and the README (License and credits) says forks and
-   modified versions must remove them, so a build or page this fork publishes
-   leaves them out.
+   `ATTRIBUTION.md` in the same change. The ArtCraft name, wordmark and logos
+   in `docs/brand/` are trademarks, not open source. README.md:418 says:
+   "Forks and modified versions must remove them." `docs/brand/LICENSE-brand.txt`
+   says: "If you distribute or publish a modified version of PhotoCraft, or any
+   work derived from it, you must remove the ArtCraft Marks from it (or replace
+   them with your own)", and "A fork kept only to propose changes back to this
+   repository may keep the marks unchanged." This file does not decide which
+   kind of fork this one is: a change that adds, keeps or removes the marks
+   follows Elijah's own words on it, quoted in the pull request.
 
 No code here takes a payment, sends email or keeps a list. The README calls
 the app offline, and its only network listeners are the two loopback servers
@@ -191,7 +212,8 @@ phone numbers and photos of people, and confirms the pull request targets
 | Email to the lists | None: no email, no list, no account | Nothing in the diff sends mail; a change that adds it names the provider and where its key lives |
 | Contracts or anything on chain | Nothing on chain | The keys' home named in the pull request and absent from the diff |
 | Commands and tools (`crates/engine`, `menu_catalog.rs`) | The "Adding a command" checklist: params doc, `enabled`, one history step, bad-param tests, several depths | A test that fails without the change; `panic_hunt -- --ignored` passes; after new commands, `cargo xtask parity` run, `docs/parity.md` committed and `FLOOR` in `crates/ui-egui/src/parity.rs` not lowered |
-| Files and formats (`psd`, `codecs`, `io`, `format`, `heif`) | Round-trip, generator and malformed-input tests; unknown PSD blocks kept verbatim; a new document field added to `crates/format/src/manifest.rs` and `convert.rs` with `#[serde(default)]` (AGENTS.md section 8) | The corpus job's output (`cargo xtask test-corpus`), no corpus result or floor lowered |
-| Rendering and effects (`compose`, `gpu`, `algo`) | The CPU compositor is the oracle and the GPU path matches it; work per tile, cache per revision | A test that fails without the change; a public-domain image rendered with `PHOTOCRAFT_CPU_COMPOSE=1` and without, opened side by side; the corpus job; `cargo xtask perf --quick` before and after on a hot path |
+| Files and formats (`psd`, `codecs`, `io`, `format`, `heif`) | Round-trip, generator and malformed-input tests; unknown PSD blocks kept verbatim; a new document field added to `crates/format/src/manifest.rs` and `convert.rs` with `#[serde(default)]` (AGENTS.md section 8) | The corpus job's output (`cargo xtask test-corpus`), or, where the corpus cannot be fetched, the runs under "When the corpus cannot be fetched" with what was missing noted in the review; no corpus result or floor lowered |
+| Rendering and effects (`compose`, `gpu`, `algo`) | The CPU compositor is the oracle and the GPU path matches it; work per tile, cache per revision | A test that fails without the change; a public-domain image rendered with `PHOTOCRAFT_CPU_COMPOSE=1` and without, opened side by side; the corpus job, or the runs under "When the corpus cannot be fetched" noted in the review; `cargo xtask perf --quick` before and after on a hot path |
 | Dependencies and config | `Cargo.lock` updated and used with `--locked`; no JavaScript, Tauri or webview; why the crate is needed and its licence in the pull request (book/src/development/dependencies.md) | All steps above, including `cargo xtask wasm` and the craft-fonts pass; that only Linux ran is stated |
-| Taking newer upstream commits | Merge storytold/photocraft's `main` into a branch, never a rebase, and keep Elijah's commits | Every step above plus the corpus job; each of Elijah's commits still in the tree |
+| Taking newer upstream commits | Merge storytold/photocraft's `main` into a branch, never a rebase, and keep Elijah's commits | Every step above plus the corpus job (or the runs under "When the corpus cannot be fetched", noted in the review); each of Elijah's commits still in the tree |
+| Contributor credits (`contributors/`) | `people.toml` holds real names people chose for themselves, shown in the About window. AGENTS.md (Contributor credits): an agent adds only its own human's `[people.<username>]` entry, after asking them once, committed as them; never adds, edits, guesses or copies anyone else's entry or name (not from git config, commit authors or GitHub profiles); never hand-edits the generated `contributors.json`. A maintainer adds a person only when they asked, recording where in `consent_source` (the file's header) | Every added or changed `people.toml` entry belongs to the pull request's own author, or carries `consent_source`; no other entry touched; `contributors.json` not hand-edited; no name taken from git or GitHub |
