@@ -359,7 +359,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 if g.chisel_soft > 0.0 { b.conv(h, photocraft_compose::effects::tent_kernel(g.chisel_soft)) } else { h }
             };
             if let Some(lut) = photocraft_compose::effects::bevel_contour_lut(bv, &g) {
-                // Contour element (`effects::bevel_contour_lut`): over the bevel's own ramp.
+                // Contour element: the CPU's height transfer (`effects::bevel_contour_lut`).
                 let mut st = stage(Kernel::MFinish, Some(h), None, [0.0, 0.0, 1.0, 0.0], 0);
                 st.lut = Some(Arc::new(lut));
                 h = b.push(st);

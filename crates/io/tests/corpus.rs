@@ -521,3 +521,26 @@ fn photoshop_oracle_corpus() {
 fn psd_tools_mutations_never_panic() {
     run_mutations(&PSD_TOOLS);
 }
+
+/// The bevel Contour element against Photoshop's own renders: mean error over white, in 8-bit
+/// steps, of the whole flatten against the merged image. The bounds sit above what the fitted
+/// range mapping gives (1.9, 3.2, 0.9); the plain ranged contour it replaced was 21.9, 20.8
+/// and 8.2 off (`effects::bevel_contour_lut`).
+#[test]
+fn bevel_contour_element_follows_photoshop() {
+    let root = locate(&PHOTOSHOP).join("effects");
+    for (name, bound) in
+        [("bevel-inner-contour-ramp-peak.psd", 3.0), ("bevel-inner-contour-double-ring-aa-r70.psd", 4.5), ("combo-bevel-satin-glows-stroke.psd", 2.0)]
+    {
+        let bytes = std::fs::read(root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let file = PsdFile::from_bytes(&bytes).unwrap();
+        let ours = photocraft_compose::flatten(&import(name, &bytes).unwrap().document).px;
+        let ps = merged_composite(&file).unwrap();
+        assert_eq!(ours.len(), ps.len(), "{name}");
+        let over_white = |p: &[f32; 4], c: usize| p[c] * p[3] + 1.0 - p[3];
+        let sum: f64 = ours.iter().zip(&ps).map(|(p, q)| f64::from((0..3).map(|c| (over_white(p, c) - over_white(q, c)).abs()).fold(0.0f32, f32::max))).sum();
+        let mean = 255.0 * sum / ours.len() as f64;
+        eprintln!("{name:<48} mean {mean:.2} / 255 (bound {bound})");
+        assert!(mean <= bound, "{name}: mean {mean:.2} / 255 over the bound {bound}");
+    }
+}
