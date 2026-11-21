@@ -919,6 +919,41 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     }
 }
 
+/// The Contour element's height transfer (CPU `bevel_height` and the GPU plan share it), or
+/// `None` without one (or when it changes nothing).
+///
+/// A Smooth inner bevel's height is a blur of the shape: about 0 a blur width outside, 0.5 at
+/// the edge, 1 a blur width inside. The contour spans the top `range` of that height,
+/// `contour(clamp((h − (1 − range)) / range, 0, 1))`: at 50 % it runs from the edge to the
+/// bevel's full size inward, at 70 % it starts a little outside the edge, and below 50 % it
+/// covers only the inner part of the bevel, with the outer part flat at `contour(0)`. At 100 %
+/// it is `contour(h)`, as before. Fitted on Photoshop's own renders, since its maths is not
+/// published: on `effects/bevel-inner-contour-ramp-peak` (50 %),
+/// `effects/bevel-inner-contour-double-ring-aa-r70` (70 %) and the soft-S contour of
+/// `effects/combo-bevel-satin-glows-stroke` (50 %), this mapping is within a mean of 1.9, 3.2
+/// and 0.9 of 255, where `contour(min(h / range, 1))` (the Glow range, which put every inside
+/// pixel past a small range and drew the bevel flat) was 21.9, 20.8 and 8.2 off.
+/// Other styles and techniques, Stroke Emboss included, keep that plain ranged contour.
+pub fn bevel_contour_lut(b: &Bevel, g: &BevelGeom) -> Option<Vec<f32>> {
+    let c = b.contour.as_ref()?;
+    let range = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
+    // Stroke Emboss paints inside too, but no oracle covers its contour yet.
+    if b.technique != BevelTechnique::Smooth || g.paint != BevelPaint::Inner || b.style == BevelStyle::StrokeEmboss || range >= 0.999 {
+        return ranged_lut(&c.contour, c.range);
+    }
+    let n = 4096;
+    let base = contour_lut(&c.contour);
+    Some(
+        (0..n)
+            .map(|k| {
+                let h = k as f32 / (n - 1) as f32;
+                let v = ((h - (1.0 - range)) / range).clamp(0.0, 1.0);
+                base.as_ref().map_or(v, |l| lut_at(l, v))
+            })
+            .collect(),
+    )
+}
+
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge (size wide; emboss styles
 /// straddle the edge), slightly blurred for Chisel Soft. Soften blurs the result.
@@ -940,8 +975,8 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
         h
     };
     // Contour element: the height profile through the contour over its range.
-    if let Some(c) = &b.contour {
-        h = apply_lut(h, Some(ranged_lut(&c.contour, c.range).unwrap_or_else(|| (0..4096).map(|k| k as f32 / 4095.0).collect())));
+    if let Some(l) = bevel_contour_lut(b, g) {
+        h = apply_lut(h, Some(l));
     }
     // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
     // at 100 % depth slopes like the bevel at its depth.
@@ -1823,6 +1858,70 @@ mod tests {
         let mid: f32 = (16..24).map(|y| m[0].v[y * 40 + 20] + m[1].v[y * 40 + 20]).sum();
         let flat: f32 = (16..24).map(|y| a[0].v[y * 40 + 20] + a[1].v[y * 40 + 20]).sum();
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
+    }
+
+    #[test]
+    fn cone_contour_element_draws_ridges_inside_a_smooth_inner_bevel() {
+        // A chrome style from a commercial template, on a 160 px square: Inner Bevel, Smooth,
+        // depth 407 %, up, 43 px, soften 3, angle 90, altitude 48, gloss Cone, Contour element
+        // Cone at 24 %. Under the plain ranged contour every inside pixel mapped to Cone(1) = 0
+        // and the bevel drew nothing (0.13 % of inside pixels shaded).
+        let (w, a, z) = (200usize, 20usize, 180usize);
+        let shape = square(w, a, z);
+        let cone = Contour::Custom {
+            name: "Cone".into(),
+            points: vec![
+                photocraft_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
+                photocraft_doc::adjust::CurvePoint { input: 129.0 / 255.0, output: 1.0 },
+                photocraft_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
+            ],
+        };
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.depth, b.size, b.soften, b.angle, b.altitude) = (4.07, 43.0, 3.0, 90.0, 48.0);
+        b.gloss_contour = cone.clone();
+        b.contour = Some(photocraft_doc::BevelContour { contour: cone, range: 0.24, anti_alias: true });
+        let (m, paint) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        assert_eq!(paint, BevelPaint::Inner);
+        let inside = |i: usize| shape.v[i] >= 1.0;
+        let n_in = (0..w * w).filter(|&i| inside(i)).count() as f32;
+        let shaded = (0..w * w).filter(|&i| inside(i) && m[0].v[i] + m[1].v[i] > 0.02).count() as f32;
+        // The bevel band (43 px of a 160 px square) is about 75 % of the inside; the Cone ridge
+        // over the top 24 % of its height shades at least 10 % of the inside pixels (the
+        // template's own render has 12.0 % white highlights and 30.7 % near-black on its art).
+        assert!(shaded / n_in > 0.10, "inside shaded {:.2} %", 100.0 * shaded / n_in);
+        // A ridge, not a ramp: down the top edge's middle column the highlight rises, falls and
+        // rises again (light then dark then light), as on the template's chrome edge.
+        let col: Vec<f32> = (a..a + 43).map(|y| m[0].v[y * w + w / 2] - m[1].v[y * w + w / 2]).collect();
+        let turns = col.windows(3).filter(|t| (t[1] - t[0]) * (t[2] - t[1]) < -1e-6).count();
+        assert!(turns >= 2, "profile has {turns} turns: {col:?}");
+    }
+
+    #[test]
+    fn bevel_contour_range_spans_the_top_of_a_smooth_inner_height() {
+        // Fitted on Photoshop's renders (`bevel_contour_lut`): the contour spans the top `range`
+        // of the smooth height, so Linear at 50 % turns the inside half (0.5 at the edge to 1 a
+        // bevel size in) into a full 0..1 ramp and leaves the outside flat.
+        let pt = |input: f32, output: f32| photocraft_doc::adjust::CurvePoint { input, output };
+        let lut = |contour: Contour, range: f32| {
+            let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+            b.contour = Some(photocraft_doc::BevelContour { contour, range, anti_alias: false });
+            bevel_contour_lut(&b, &bevel_geom(&b)).expect("a Contour element at 50 % shapes the height")
+        };
+        let linear = lut(Contour::Custom { name: "Linear".into(), points: vec![pt(0.0, 0.0), pt(1.0, 1.0)] }, 0.5);
+        for (h, want) in [(0.0, 0.0), (0.4, 0.0), (0.5, 0.0), (0.625, 0.25), (0.75, 0.5), (1.0, 1.0)] {
+            assert!((lut_at(&linear, h) - want).abs() < 2e-3, "Linear 50 % at {h}: {} (want {want})", lut_at(&linear, h));
+        }
+        // A contour that starts high (Cone - Inverted) has no step at the edge: the outside keeps
+        // contour(0), and the inside falls from it to the valley halfway in, then climbs back.
+        let inv = lut(Contour::Custom { name: "Cone - Inverted".into(), points: vec![pt(0.0, 1.0), pt(0.5, 0.0), pt(1.0, 1.0)] }, 0.5);
+        assert!((lut_at(&inv, 0.3) - 1.0).abs() < 2e-3 && (lut_at(&inv, 0.5) - 1.0).abs() < 2e-3);
+        assert!((lut_at(&inv, 0.505) - lut_at(&inv, 0.495)).abs() < 0.05, "a step at the edge");
+        assert!(lut_at(&inv, 0.75) < 0.05 && lut_at(&inv, 1.0) > 0.95);
+        // At 100 % the contour runs over the whole height, as the plain ranged contour does.
+        let ramp_peak = Contour::Custom { name: "Ramp peak".into(), points: vec![pt(0.0, 0.0), pt(0.5, 1.0), pt(1.0, 0.0)] };
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        b.contour = Some(photocraft_doc::BevelContour { contour: ramp_peak.clone(), range: 1.0, anti_alias: false });
+        assert_eq!(bevel_contour_lut(&b, &bevel_geom(&b)), ranged_lut(&ramp_peak, 1.0));
     }
 
     #[test]
