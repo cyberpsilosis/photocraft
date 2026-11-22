@@ -977,10 +977,9 @@ mod color_balance_tests {
         // The steepest curves the sliders reach (midtones at both ends: exponents 0.5 and 2), with
         // black and white points moved, through the per-level tables at 8 and 16 bits.
         for preserve_luminosity in [true, false] {
-            let a =
-                Adjustment::ColorBalance { shadows: [-40.0, 10.0, 30.0], midtones: [100.0, -100.0, 0.0], highlights: [5.0, -20.0, 0.0], preserve_luminosity };
-            let Adjustment::ColorBalance { shadows, midtones, highlights, .. } = &a else { unreachable!() };
-            let curves = color_balance_curves(shadows, midtones, highlights, preserve_luminosity);
+            let (shadows, midtones, highlights) = ([-40.0, 10.0, 30.0], [100.0, -100.0, 0.0], [5.0, -20.0, 0.0]);
+            let a = Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity };
+            let curves = color_balance_curves(&shadows, &midtones, &highlights, preserve_luminosity);
             for depth in [SampleType::U8, SampleType::U16] {
                 let Some(q) = crate::adjustment_quantum(depth) else { panic!("integer depth") };
                 let n = q as usize;
