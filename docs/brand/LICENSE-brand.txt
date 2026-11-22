@@ -1,3 +1,13 @@
+Note for this fork (cyberpsilosis/photocraft), added 2026-11-21
+
+This copy is a modified version of PhotoCraft. As "Forks and modified versions" below requires, the
+eight ArtCraft logo and mark image files this directory held (the logo and the mark, each in two
+colours, as PNG and SVG) have been removed, and no file of this fork shows them. This file is kept
+unchanged below this note as the record of the ArtCraft Team's terms, which still cover the
+ArtCraft name.
+
+----------------------------------------------------------------------------------------------------
+
 ArtCraft brand assets: license
 
 The ArtCraft name, wordmark and mark (the "ArtCraft Marks"), including every file in this

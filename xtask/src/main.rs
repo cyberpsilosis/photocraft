@@ -8,6 +8,7 @@ mod corpus_pins;
 mod i18n_coverage;
 mod ico;
 mod layers;
+mod no_artcraft_marks;
 mod perf;
 mod pinned;
 mod scorecard;
