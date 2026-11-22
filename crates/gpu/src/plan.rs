@@ -914,8 +914,13 @@ impl<'a> Planner<'a> {
                 p.clip = Some(clip);
             }
         }
-        for c in clipped {
-            content = self.atop(c, content)?;
+        // Clipped layers go into the content, beneath every effect, unless the layer's blending
+        // options put them above its fill-type interior effects (compose `clips_above_interior`).
+        let clips_above = photocraft_compose::effects::clips_above_interior(layer);
+        if !clips_above {
+            for c in clipped {
+                content = self.atop(c, content)?;
+            }
         }
         let fx = self.fx.len();
         self.fx.push(FxLayer { layer, region, bounds: sb });
@@ -1039,6 +1044,11 @@ impl<'a> Planner<'a> {
             if let Effect::InnerGlow(g) = e {
                 let paint = self.glow_paint(g, anchor);
                 l = self.paint(l, content, Cov::Map(map(i, 0), 0.0), &paint, g.common.blend, g.common.opacity, F_REL, clip, sb);
+            }
+        }
+        if clips_above {
+            for c in clipped {
+                l = self.atop(c, l)?;
             }
         }
         for &(i, e) in &rev {
