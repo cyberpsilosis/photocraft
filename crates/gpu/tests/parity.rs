@@ -855,6 +855,36 @@ fn layer_effects_every_kind() {
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
+/// Layers clipped to a base with effects, with the base's "Blend Interior Effects as Group" and
+/// "Blend Clipped Layers as Group" in each combination: on and off (PSD `infx` 1, `clbl` 0) the
+/// clipped layers go above the fill-type interior effects, otherwise beneath every effect.
+#[test]
+fn clipped_layers_over_interior_effects() {
+    let Some(mut g) = gpu() else { return };
+    let stack = effect_cases().into_iter().find(|(n, _)| *n == "full stack").unwrap().1;
+    for depth in [SampleType::U8, SampleType::U16] {
+        for flags in [None, Some((1u8, 0u8)), Some((1, 1)), Some((0, 0))] {
+            for blend in [BlendMode::Overlay, BlendMode::Normal, BlendMode::Multiply] {
+                let mut d = fx_doc(96, 80, depth);
+                let fmt = d.pixel_format();
+                let mut l = blob("fx", fmt, 46.0, 40.0, 22.0, [0.9, 0.4, 0.2]);
+                l.effects.items = stack.clone();
+                if let Some((infx, clbl)) = flags {
+                    l.psd_blocks.push((*b"infx", std::sync::Arc::new(vec![infx, 0, 0, 0])));
+                    l.psd_blocks.push((*b"clbl", std::sync::Arc::new(vec![clbl, 0, 0, 0])));
+                }
+                d.layers.push(l);
+                let mut c = noise_layer("clip", fmt, Rect::new(20, 10, 80, 70), 31, 0.5);
+                c.clipped = true;
+                c.blend = blend;
+                c.opacity = 0.8;
+                d.layers.push(c);
+                fx_check(&mut g, &d, &format!("clipped {blend:?} flags {flags:?} {depth:?}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn layer_effects_opacity_fill_blend_and_off_canvas() {
     let Some(mut g) = gpu() else { return };
