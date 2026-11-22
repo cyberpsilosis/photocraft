@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::process::Command;
 
     /// The removed files' names began with the two strings below; they are built from parts so this
@@ -15,14 +16,41 @@ mod tests {
 
     /// Every tracked file plus every untracked one that is not ignored, so a file about to be
     /// committed is caught too (build output, `corpus/` and other ignored folders are skipped).
+    /// A source tree without `.git` (a GitHub zip download) has no `git ls-files`, so the guard
+    /// walks the tree instead and skips the folders `.gitignore` keeps out.
     fn repo_files() -> Vec<String> {
+        let root = crate::root();
+        if !root.join(".git").exists() {
+            let mut files = Vec::new();
+            walk(&root, &root, &mut files);
+            return files;
+        }
         let out = Command::new("git")
             .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-            .current_dir(crate::root())
+            .current_dir(&root)
             .output()
-            .expect("git runs (this guard needs a git checkout)");
+            .expect("git runs in a git checkout");
         assert!(out.status.success(), "git ls-files failed: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect()
+    }
+
+    /// The folders `.gitignore` keeps out (build output, fetched corpora and fonts, local notes),
+    /// which the walk without git skips. No tracked folder has one of these names.
+    const SKIP: [&str; 10] = [".git", "target", "dist", "corpus", "log", "secrets", "temp", "plan", "craft-fonts", "output"];
+
+    fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !SKIP.contains(&name.as_str()) {
+                    walk(root, &path, files);
+                }
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
     }
 
     #[test]
@@ -59,5 +87,20 @@ mod tests {
         let sample = ["<img alt=\"x\" src=\"docs/brand/ARTCRAFT", "-MARK.svg\">"].concat().to_lowercase();
         assert!(needles.iter().any(|n| sample.contains(n.as_str())));
         assert!(!needles.iter().any(|n| "PhotoCraft by the ArtCraft team".to_lowercase().contains(n.as_str())));
+    }
+
+    #[test]
+    fn the_walk_without_git_finds_a_mark_file_and_skips_ignored_folders() {
+        let tmp = std::env::temp_dir().join(format!("xtask-mark-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mark = ["artcraft", "-mark.svg"].concat();
+        std::fs::create_dir_all(tmp.join("docs/brand")).expect("make docs/brand");
+        std::fs::create_dir_all(tmp.join("target/debug")).expect("make target");
+        std::fs::write(tmp.join("docs/brand").join(&mark), "<svg/>").expect("write mark");
+        std::fs::write(tmp.join("target/debug").join(&mark), "<svg/>").expect("write build copy");
+        let mut files = Vec::new();
+        walk(&tmp, &tmp, &mut files);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(files, vec![format!("docs/brand/{mark}")]);
     }
 }
