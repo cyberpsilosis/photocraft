@@ -210,6 +210,7 @@ fn adjustments() -> Vec<Adjustment> {
         Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: true },
         Adjustment::ColorBalance { shadows: [20.0, -10.0, 5.0], midtones: [-15.0, 10.0, 30.0], highlights: [0.0, 5.0, -20.0], preserve_luminosity: true },
         Adjustment::ColorBalance { shadows: [10.0, 0.0, 0.0], midtones: [0.0, 0.0, 0.0], highlights: [0.0, 0.0, 10.0], preserve_luminosity: false },
+        Adjustment::ColorBalance { shadows: [-31.0, 17.0, 35.0], midtones: [12.0, 14.0, 5.0], highlights: [1.0, -9.0, 26.0], preserve_luminosity: true },
         Adjustment::SelectiveColor { relative: true, adjustments: selective() },
         Adjustment::SelectiveColor { relative: false, adjustments: selective() },
         lookup(17, false, false),
