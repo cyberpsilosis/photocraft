@@ -659,6 +659,83 @@ fn clipped_layer_effects_are_clipped_to_base() {
     assert!(close4(px(&d, 20, 8), [1.0; 4]), "stroke clipped outside base");
 }
 
+/// Blending Options with "Blend Interior Effects as Group" on and "Blend Clipped Layers as Group"
+/// off (PSD `infx` 1, `clbl` 0): the clipped layers sit above the base's Colour Overlay and Satin
+/// and beneath its Inner Shadow. The base carries a chrome style's Satin, Inner Shadow and Colour
+/// Overlay numbers; with Overlay layers clipped to it and a Gradient Map above, that order gives
+/// 31.4 % near-black pixels against Photoshop's 31.3 %, where clipped layers beneath every effect
+/// gave 10.8 % (and a mean luma of 121.6 against Photoshop's 83.7; now 89.8).
+#[test]
+fn clipped_layers_sit_between_fill_effects_and_inner_shadow() {
+    use photocraft_color::BlendMode as B;
+    // 600 × 400: the centre is past the inner shadow's reach (29 + 111 px) from every edge.
+    let bar = Rect::new(20, 20, 620, 420);
+    let grey = |v: f32| Color::rgb(v, v, v);
+    let doc = |flags: Option<(u8, u8)>, clip: Option<(B, f32)>| {
+        let mut d = doc_white(640, 440);
+        let mut base = solid_layer("base", bar, [1.0, 0.0, 0.0, 1.0]);
+        base.effects.items = vec![
+            Effect::InnerShadow(Shadow {
+                common: FxCommon::new(B::Multiply, 0.6),
+                color: grey(57.0 / 255.0),
+                spread: 0.0,
+                size: 111.0,
+                knocks_out: false,
+                ..shadow(29.0, 90.0)
+            }),
+            Effect::Satin(Satin {
+                common: FxCommon::new(B::Multiply, 1.0),
+                color: grey(119.0 / 255.0),
+                angle: 90.0,
+                distance: 130.0,
+                size: 250.0,
+                contour: photocraft_doc::Contour::Linear,
+                anti_alias: false,
+                invert: true,
+            }),
+            Effect::ColorOverlay { common: FxCommon::new(B::Normal, 1.0), color: Color::WHITE },
+        ];
+        if let Some((infx, clbl)) = flags {
+            base.psd_blocks.push((*b"infx", std::sync::Arc::new(vec![infx, 0, 0, 0])));
+            base.psd_blocks.push((*b"clbl", std::sync::Arc::new(vec![clbl, 0, 0, 0])));
+        }
+        d.layers.push(base);
+        if let Some((mode, v)) = clip {
+            let mut c = solid_layer("clip", bar, [v, v, v, 1.0]);
+            c.blend = mode;
+            c.clipped = true;
+            d.layers.push(c);
+        }
+        d
+    };
+    let (centre, top) = ((320, 220), (320, 30));
+    let at = |d: &Document, (x, y): (i32, i32)| px(d, x, y)[0];
+
+    // A Normal mid-grey clipped layer covers the overlay and the satin; the inner shadow (light
+    // from the top) still darkens the top inside edge above it.
+    let d = doc(Some((1, 0)), Some((B::Normal, 0.5)));
+    assert!((at(&d, centre) - 0.5).abs() <= E, "centre {}", at(&d, centre));
+    assert!(at(&d, top) < 0.4, "top edge {}", at(&d, top));
+
+    // Every other pair of flags keeps the clipped layer beneath the Colour Overlay, which hides it.
+    for flags in [None, Some((0, 1)), Some((1, 1)), Some((0, 0))] {
+        let (with, without) = (doc(flags, Some((B::Normal, 0.5))), doc(flags, None));
+        for p in [centre, top] {
+            assert!((at(&with, p) - at(&without, p)).abs() <= E, "{flags:?} {p:?}: {} vs {}", at(&with, p), at(&without, p));
+        }
+    }
+
+    // Overlay layers, as in the chrome style: a light one lifts the satin's grey and a dark one
+    // lowers it, by the Overlay formula on the grey beneath.
+    let plain = at(&doc(Some((1, 0)), None), centre);
+    let overlay = |b: f32, s: f32| if b < 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) };
+    for v in [0.8, 0.15] {
+        let got = at(&doc(Some((1, 0)), Some((B::Overlay, v))), centre);
+        assert!((got - overlay(plain, v)).abs() <= E, "overlay {v} on {plain}: {got}");
+        assert!((got - plain).abs() > 0.1, "overlay {v} changes the grey {plain}: {got}");
+    }
+}
+
 #[test]
 fn group_effects_apply_to_group_shape() {
     let mut d = doc_white(40, 40);
