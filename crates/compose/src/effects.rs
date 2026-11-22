@@ -1161,6 +1161,21 @@ fn satin_map(shape: &Map, s: &photocraft_doc::effects::Satin) -> Map {
     m
 }
 
+/// Whether `layer`'s clipped layers composite above its fill-type interior effects (colour,
+/// gradient and pattern overlays, satin, inner glow) instead of beneath every effect: Blending
+/// Options with "Blend Interior Effects as Group" on and "Blend Clipped Layers as Group" off
+/// (PSD `infx` 1 and `clbl` 0, kept in [`Layer::psd_blocks`]). Any other pair keeps them beneath:
+/// psd-tools `clipping-order/*` (Photoshop composites) show a red Colour Overlay covering the
+/// clipped checkerboard in the three other combinations and the checkerboard on top in this one.
+/// The inner shadow, strokes and bevel stay above the clipped layers: on a chrome style with
+/// Overlay layers clipped to it (Satin Multiply, Inner Shadow Multiply, Bevel, a Gradient Map
+/// above), this order gives 31.4 % near-black pixels after the map against Photoshop's 31.3 %;
+/// clipped layers above every interior effect give 26.5 %, beneath them all 10.8 %.
+pub fn clips_above_interior(layer: &Layer) -> bool {
+    let flag = |key: &[u8; 4]| layer.psd_blocks.iter().find(|(k, _)| k == key).and_then(|(_, d)| d.first()).map(|v| *v != 0);
+    flag(b"infx") == Some(true) && flag(b"clbl") == Some(false)
+}
+
 /// Build every effect map for `layer` from its alpha `shape` over `rect`.
 pub fn build_maps(layer: &Layer, shape: Vec<f32>, rect: Rect, light: &GlobalLight, tex: &TextureCtx) -> FxMaps {
     let prepared = PreparedPatterns::new(tex.patterns, PREPARED_PATTERN_BYTES);
@@ -1223,9 +1238,10 @@ const FAR: f32 = 1.0e9;
 /// masked, clipped layers applied) plus its effects into `backdrop`.
 pub fn composite_with_effects(layer: &Layer, content: &Buffer, backdrop: &mut Buffer, maps: &FxMaps, layer_bounds: Rect, patterns: &[Pattern]) {
     let prepared = PreparedPatterns::new(patterns, PREPARED_PATTERN_BYTES);
-    composite_with_effects_prepared(layer, content, backdrop, maps, layer_bounds, &prepared, None);
+    composite_with_effects_prepared(layer, content, backdrop, maps, layer_bounds, &prepared, None, None);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn composite_with_effects_prepared(
     layer: &Layer,
     content: &Buffer,
@@ -1234,6 +1250,10 @@ pub(crate) fn composite_with_effects_prepared(
     layer_bounds: Rect,
     patterns: &PreparedPatterns<'_>,
     vstroke: Option<VectorStroke<'_>>,
+    // Paints the layer's clipped layers onto the layer's colour, when they go above its
+    // fill-type interior effects ([`clips_above_interior`]); `None` when they were already
+    // composited into `content`.
+    clipped_above: Option<&dyn Fn(&mut Buffer)>,
 ) {
     let big = content.rect;
     let (w, h) = (big.width() as usize, big.height() as usize);
@@ -1337,6 +1357,12 @@ pub(crate) fn composite_with_effects_prepared(
         if let Effect::InnerGlow(g) = e {
             paint_glow(&mut lay, &rel(fx(i, 0)), g, sb, anchor, big, patterns);
         }
+    }
+    // Clipped layers of a layer that blends its interior effects as a group and its clipped
+    // layers apart ([`clips_above_interior`]) sit here: above the overlays, satin and inner glow,
+    // beneath the inner shadow, the strokes and the bevel.
+    if let Some(paint_clipped) = clipped_above {
+        paint_clipped(&mut lay);
     }
     for (i, e) in rev() {
         if let Effect::InnerShadow(s) = e {

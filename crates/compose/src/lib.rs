@@ -1149,9 +1149,19 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
                 (content, None)
             }
         };
-        for c in clipped.iter().filter(|c| c.visible) {
-            composite_atop(c, &mut content, cx);
+        // Clipped layers go into the content, beneath every effect, unless the layer's blending
+        // options put them above its fill-type interior effects.
+        let above = effects::clips_above_interior(layer);
+        if !above {
+            for c in clipped.iter().filter(|c| c.visible) {
+                composite_atop(c, &mut content, cx);
+            }
         }
+        let paint_clipped = |b: &mut Buffer| {
+            for c in clipped.iter().filter(|c| c.visible) {
+                composite_atop(c, b, cx);
+            }
+        };
         let vstroke = vstroke.as_ref().map(|(s, m)| effects::VectorStroke { stroke: s, mask: m.as_deref() });
         let maps = effect_maps(layer, cx);
         effects::composite_with_effects_prepared(
@@ -1162,6 +1172,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
             cx.patterns,
             vstroke,
+            above.then_some(&paint_clipped as &dyn Fn(&mut Buffer)),
         );
         return;
     }
@@ -1461,6 +1472,7 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
             paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
             cx.patterns,
             vstroke,
+            None,
         );
         for (p, o) in base.px.iter_mut().zip(&opaque.px) {
             if p[3] > 0.0 {
