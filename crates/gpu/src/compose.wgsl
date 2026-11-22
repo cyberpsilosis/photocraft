@@ -564,8 +564,11 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             return o;
         }
         case 14: {                                                             // Color balance
-            // Per channel: black point p0, white point p1, exponent p2 (color_balance_curves).
-            let t = clamp((c - p0.rgb) / max(p1.rgb - p0.rgb, vec3(1e-6)), vec3(0.0), vec3(1.0));
+            // Per channel: black point p0, white point p1, exponent p2 (color_balance_curves),
+            // on the nearest whole level when p3.x holds the document's steps per unit.
+            let q = p3.x;
+            let v = select(c, floor(clamp(c, vec3(0.0), vec3(1.0)) * q + 0.5) / q, q > 0.0);
+            let t = clamp((v - p0.rgb) / max(p1.rgb - p0.rgb, vec3(1e-6)), vec3(0.0), vec3(1.0));
             return select(pow(t, p2.rgb), vec3(0.0), t <= vec3(0.0));
         }
         case 15: { return selective_color(c, p0.x > 0.5); }                       // Selective color

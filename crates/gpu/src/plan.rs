@@ -1528,6 +1528,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             for (row, k) in p.iter_mut().zip(0..3) {
                 *row = [curves[0][k], curves[1][k], curves[2][k], 0.0];
             }
+            // Integer documents: the CPU looks each channel up at its nearest whole level; p3.x
+            // carries the steps per unit (0 = 32-bit, the value itself).
+            p[3][0] = photocraft_compose::adjustment_quantum(depth).unwrap_or(0.0);
             (14, p, None)
         }
         Adjustment::SelectiveColor { relative, adjustments } => {
