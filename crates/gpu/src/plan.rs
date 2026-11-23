@@ -1533,10 +1533,14 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             (13, p, Some(rows))
         }
         Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => {
-            p[0] = [shadows[0], shadows[1], shadows[2], 0.0];
-            p[1] = [midtones[0], midtones[1], midtones[2], 0.0];
-            p[2] = [highlights[0], highlights[1], highlights[2], 0.0];
-            p[3][0] = if *preserve_luminosity { 1.0 } else { 0.0 };
+            // The CPU's own per-channel curves: black points, white points, exponents.
+            let curves = photocraft_compose::adjust::color_balance_curves(shadows, midtones, highlights, *preserve_luminosity);
+            for (row, k) in p.iter_mut().zip(0..3) {
+                *row = [curves[0][k], curves[1][k], curves[2][k], 0.0];
+            }
+            // Integer documents: the CPU looks each channel up at its nearest whole level; p3.x
+            // carries the steps per unit (0 = 32-bit, the value itself).
+            p[3][0] = photocraft_compose::adjustment_quantum(depth).unwrap_or(0.0);
             (14, p, None)
         }
         Adjustment::SelectiveColor { relative, adjustments } => {

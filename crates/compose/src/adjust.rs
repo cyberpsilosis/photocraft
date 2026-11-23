@@ -9,6 +9,7 @@ use photocraft_doc::Adjustment;
 use photocraft_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace, lut3d_len};
 
 use crate::Buffer;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The document tone curve used to linearize values for adjustments that
 /// work in linear light (Exposure). Until ICC profiles are wired in (M8) this
@@ -189,19 +190,22 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 p[..3].copy_from_slice(&o);
             }
         }
-        Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => map_rgb(buf, |c| {
-            let l = rgb_to_gray(c);
-            let ws = (1.0 - l * 2.0).clamp(0.0, 1.0);
-            let wh = (l * 2.0 - 1.0).clamp(0.0, 1.0);
-            let wm = 1.0 - ws - wh;
-            let out: [f32; 3] = std::array::from_fn(|i| (c[i] + (shadows[i] * ws + midtones[i] * wm + highlights[i] * wh) / 100.0 * 0.5).clamp(0.0, 1.0));
-            if *preserve_luminosity {
-                let l1 = rgb_to_gray(out).max(1e-6);
-                out.map(|v| (v * l / l1).clamp(0.0, 1.0))
-            } else {
-                out
+        Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => {
+            let curves = color_balance_curves(shadows, midtones, highlights, *preserve_luminosity);
+            match depth.and_then(crate::adjustment_quantum) {
+                // Integer documents hold whole levels (and Photoshop applies the step at the
+                // document's depth), so each channel is one exact lookup per level instead of a
+                // power per pixel. 32-bit and unrounded buffers keep the power.
+                Some(q) => {
+                    let tables = color_balance_tables(curves, q);
+                    let top = q as usize;
+                    // `+ 0.5` and the saturating cast round like the compositor's `quantize`
+                    // (below 0 and NaN give level 0) without a call to `round` per channel.
+                    map_rgb(buf, |c| std::array::from_fn(|i| tables[i].get(((c[i] * q + 0.5) as usize).min(top)).copied().unwrap_or(0.0)))
+                }
+                None => map_rgb(buf, |c| std::array::from_fn(|i| color_balance_channel(c[i], curves[i]))),
             }
-        }),
+        }
         Adjustment::SelectiveColor { relative, adjustments } => map_rgb(buf, |c| selective_color(c, *relative, adjustments)),
         Adjustment::ColorLookup { lut: Some(table), size, tetrahedral, dither, .. } if lut3d_len(*size).is_some_and(|len| table.len() >= len) => {
             let (n, w, x0, y0) = (*size as usize, buf.rect.width().max(1) as usize, buf.rect.x0, buf.rect.y0);
@@ -440,6 +444,74 @@ pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32
 }
 
 const LUT_SIZE: usize = 4096;
+
+/// Color Balance as one Levels-style curve per channel: `(lo, hi, exponent)` for red, green and
+/// blue, applied by [`color_balance_channel`]. Shared by the CPU compositor and the GPU plan.
+///
+/// Fitted on the Photoshop oracles `adjustments/rgb{8,16,32}/color-balance.psd` (photocraft-corpus),
+/// where every output channel depends on that channel's input alone (a spectrum pixel's middle
+/// channel moves exactly as the same level on the grey ramp does) and follows
+/// `((v - lo) / (hi - lo)) ^ exponent` to within 0.04 of 255 at 16 bits:
+/// - Shadows move the input black point: a slider value `s` sets `lo = -s / 255`.
+/// - Highlights move the input white point: `hi = 1 - h / 255`.
+/// - Midtones set a power: `exponent = 2 ^ (-m / 100)`, so +100 halves it and -100 doubles it.
+///
+/// With "Preserve Luminosity" each range's three sliders are first shifted so that none pushes
+/// its channel the other way: shadows by their largest value (they only darken), highlights by
+/// their smallest (they only brighten), midtones by the middle of their range. The first two
+/// match the oracles exactly (black points 0/30/20, white points 235/235/255); the midtone shift
+/// is the simplest rule within 1/255 of them (a free fit puts it at 7.0 where this gives 7.5).
+/// No oracle covers Preserve Luminosity off: that branch is the same curves unshifted.
+pub fn color_balance_curves(shadows: &[f32; 3], midtones: &[f32; 3], highlights: &[f32; 3], preserve_luminosity: bool) -> [[f32; 3]; 3] {
+    // Slider values come from files and params: keep them in the dialog's -100..=100 range.
+    let clamp = |v: &[f32; 3]| v.map(|x| if x.is_finite() { x.clamp(-100.0, 100.0) } else { 0.0 });
+    let (s, m, h) = (clamp(shadows), clamp(midtones), clamp(highlights));
+    let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
+    let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
+    let (s_shift, m_shift, h_shift) = if preserve_luminosity { (max(s), (max(m) + min(m)) * 0.5, min(h)) } else { (0.0, 0.0, 0.0) };
+    std::array::from_fn(|i| {
+        let lo = -(s[i] - s_shift) / 255.0;
+        let hi = 1.0 - (h[i] - h_shift) / 255.0;
+        let exponent = (-(m[i] - m_shift) / 100.0).exp2();
+        [lo, hi, exponent]
+    })
+}
+
+/// One channel through its Color Balance curve from [`color_balance_curves`].
+#[inline]
+pub fn color_balance_channel(v: f32, [lo, hi, exponent]: [f32; 3]) -> f32 {
+    // Shadows and highlights pushed past each other leave a step, not a division by zero.
+    let t = ((v - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0);
+    if t <= 0.0 { 0.0 } else { t.powf(exponent) }
+}
+
+/// Exact per-level tables of a Color Balance in a document with `quantum` steps per unit (255 or
+/// 32768, from `adjustment_quantum`): entry `k` of channel `i` is [`color_balance_channel`] of
+/// `k / quantum`, so the integer path gives exactly what the power gives on whole levels (an
+/// interpolated [`LUT_SIZE`] table would flatten the steep start of a curve with an exponent below
+/// 1). The compositor calls [`apply_depth`] once per tile, and a 16-bit table (32,769 entries a
+/// channel) costs more powers than a 256 px tile has pixels, so the last few tables are kept.
+fn color_balance_tables(curves: [[f32; 3]; 3], quantum: f32) -> Arc<[Vec<f32>; 3]> {
+    type Key = ([u32; 9], u32);
+    type Tables = Arc<[Vec<f32>; 3]>;
+    const KEEP: usize = 8;
+    static CACHE: OnceLock<Mutex<Vec<(Key, Tables)>>> = OnceLock::new();
+    let key: Key = (std::array::from_fn(|k| curves[k / 3][k % 3].to_bits()), quantum.to_bits());
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    // A poisoned lock only costs the cache: the tables are rebuilt.
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).map(|(_, t)| Arc::clone(t))) {
+        return hit;
+    }
+    let steps = quantum.max(1.0) as usize;
+    let tables: Tables = Arc::new(std::array::from_fn(|i| (0..=steps).map(|k| color_balance_channel(k as f32 / quantum, curves[i])).collect()));
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= KEEP {
+            c.remove(0);
+        }
+        c.push((key, Arc::clone(&tables)));
+    }
+    tables
+}
 
 fn map_rgb(buf: &mut Buffer, f: impl Fn([f32; 3]) -> [f32; 3]) {
     for p in &mut buf.px {
@@ -828,5 +900,137 @@ mod tone_tests {
         apply(&Adjustment::GradientMap { stops, reverse: false, dither: true }, &mut b);
         assert!(a.px.iter().zip(&b.px).all(|(x, y)| (x[0] - y[0]).abs() <= 0.5 / 255.0 + 1e-6));
         assert!(a.px.iter().zip(&b.px).any(|(x, y)| x[0] != y[0]));
+    }
+}
+
+#[cfg(test)]
+mod color_balance_tests {
+    use super::*;
+    use photocraft_geom::Rect;
+
+    fn run(adj: &Adjustment, px: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        let rect = Rect::new(0, 0, px.len() as i32, 1);
+        let mut b = Buffer { rect, px: px.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect() };
+        apply(adj, &mut b);
+        b.px.iter().map(|p| [p[0], p[1], p[2]]).collect()
+    }
+
+    fn levels(c: [f32; 3]) -> [f32; 3] {
+        c.map(|v| v / 255.0)
+    }
+
+    #[test]
+    fn matches_photoshops_color_balance_oracle() {
+        // Photoshop's 16-bit composite of photocraft-corpus adjustments/rgb16/color-balance.psd
+        // (shadows 20/-10/0, midtones -15/10/30, highlights 0/0/-20, Preserve Luminosity), in
+        // levels of 255: grey ramp pixels, and spectrum pixels whose middle channel moves as the
+        // same level of the ramp does while 0 and 255 stay put.
+        let a =
+            Adjustment::ColorBalance { shadows: [20.0, -10.0, 0.0], midtones: [-15.0, 10.0, 30.0], highlights: [0.0, 0.0, -20.0], preserve_luminosity: true };
+        let cases: [([f32; 3], [f32; 3]); 8] = [
+            ([41.0; 3], [33.48, 14.48, 32.41]),
+            ([101.0; 3], [95.52, 90.16, 102.64]),
+            ([167.0; 3], [171.40, 171.75, 170.78]),
+            ([224.0; 3], [241.16, 241.57, 225.97]),
+            ([255.0, 69.0, 0.0], [255.0, 50.1, 0.0]),
+            ([0.0, 234.0, 255.0], [0.0, 253.8, 255.0]),
+            ([203.0, 255.0, 0.0], [215.1, 255.0, 0.0]),
+            ([0.0, 255.0, 36.0], [0.0, 255.0, 25.7]),
+        ];
+        let out = run(&a, &cases.map(|(i, _)| levels(i)));
+        for ((input, want), got) in cases.iter().zip(&out) {
+            for k in 0..3 {
+                let diff = (got[k] * 255.0 - want[k]).abs();
+                assert!(diff <= 1.0, "{input:?}: channel {k} is {:.2}, Photoshop {:.2}", got[k] * 255.0, want[k]);
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_template_greys_turn_steel_blue_like_the_vendor_render() {
+        // The Design Syndrome chrome template's Color Balance (shadows -31/17/35, midtones 12/14/5,
+        // highlights 1/-9/26, Preserve Luminosity) on a grey ramp, read where the output luma is
+        // 56, 88 and 136, against the vendor's Photoshop render's medians at those lumas. The
+        // medians are the first measurement of that render (work 9d3fc9e3, the one the job's
+        // brief quotes): (0, 76, 98), (36, 104, 128), (108, 144, 173). A second measurement on the
+        // same crop gave (0, 75, 97), (38, 105, 129), (107, 144, 172), within 2 levels of these;
+        // both are held to the same bounds.
+        let a =
+            Adjustment::ColorBalance { shadows: [-31.0, 17.0, 35.0], midtones: [12.0, 14.0, 5.0], highlights: [1.0, -9.0, 26.0], preserve_luminosity: true };
+        let ramp: Vec<[f32; 3]> = (0..=1020).map(|i| [i as f32 / 1020.0; 3]).collect();
+        let out: Vec<[f32; 3]> = run(&a, &ramp).iter().map(|c| c.map(|v| v * 255.0)).collect();
+        let luma = |c: &[f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+        let first = [(56.0, [0.0, 76.0, 98.0]), (88.0, [36.0, 104.0, 128.0]), (136.0, [108.0, 144.0, 173.0])];
+        let second = [(56.0, [0.0, 75.0, 97.0]), (88.0, [38.0, 105.0, 129.0]), (136.0, [107.0, 144.0, 172.0])];
+        for (target, vendor) in first.into_iter().chain(second) {
+            let Some(got) = out.iter().min_by(|a, b| (luma(a) - target).abs().total_cmp(&(luma(b) - target).abs())) else { panic!("empty ramp") };
+            for k in 0..3 {
+                assert!((got[k] - vendor[k]).abs() <= 24.0, "luma {target}: {got:?} against the vendor's {vendor:?}");
+            }
+            // The steel-blue cast: blue over red, at least 60% of the vendor's.
+            assert!(got[2] - got[0] >= 0.6 * (vendor[2] - vendor[0]), "luma {target}: blue - red {:.1}, vendor {}", got[2] - got[0], vendor[2] - vendor[0]);
+        }
+    }
+
+    #[test]
+    fn integer_depths_look_up_the_same_curve_level_by_level() {
+        // The steepest curves the sliders reach (midtones at both ends: exponents 0.5 and 2), with
+        // black and white points moved, through the per-level tables at 8 and 16 bits.
+        for preserve_luminosity in [true, false] {
+            let (shadows, midtones, highlights) = ([-40.0, 10.0, 30.0], [100.0, -100.0, 0.0], [5.0, -20.0, 0.0]);
+            let a = Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity };
+            let curves = color_balance_curves(&shadows, &midtones, &highlights, preserve_luminosity);
+            for depth in [SampleType::U8, SampleType::U16] {
+                let Some(q) = crate::adjustment_quantum(depth) else { panic!("integer depth") };
+                let n = q as usize;
+                let rect = Rect::new(0, 0, n as i32 + 1, 1);
+                let mut b = Buffer { rect, px: (0..=n).map(|k| [k as f32 / q, (n - k) as f32 / q, k as f32 / q, 1.0]).collect() };
+                apply_depth(&a, &mut b, Transfer::Srgb, Some(depth));
+                for (k, p) in b.px.iter().enumerate() {
+                    let want = [k, n - k, k].map(|l| l as f32 / q);
+                    for i in 0..3 {
+                        assert_eq!(p[i], color_balance_channel(want[i], curves[i]), "{depth:?} level {k} channel {i}");
+                    }
+                }
+                // A value between levels (a float blend under the layer) takes its nearest level,
+                // as in Photoshop, whose buffers hold the document's depth.
+                let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[10.4 / q, 10.6 / q, 0.2 / q, 1.0]] };
+                apply_depth(&a, &mut b, Transfer::Srgb, Some(depth));
+                let want = [10.0, 11.0, 0.0].map(|l| l / q);
+                for i in 0..3 {
+                    assert_eq!(b.px[0][i], color_balance_channel(want[i], curves[i]), "{depth:?} between levels, channel {i}");
+                }
+            }
+            // 32-bit documents keep the power on the value itself.
+            let v = [0.123_456, 0.654_321, 0.000_7];
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[v[0], v[1], v[2], 1.0]] };
+            apply_depth(&a, &mut b, Transfer::Srgb, Some(SampleType::F32));
+            for i in 0..3 {
+                assert_eq!(b.px[0][i], color_balance_channel(v[i], curves[i]), "32-bit channel {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_sliders_are_the_identity_and_extreme_ones_stay_finite() {
+        let px: Vec<[f32; 3]> = (0..=10).map(|i| [i as f32 / 10.0, 1.0 - i as f32 / 10.0, 0.5]).collect();
+        for preserve_luminosity in [true, false] {
+            let a = Adjustment::ColorBalance { shadows: [0.0; 3], midtones: [0.0; 3], highlights: [0.0; 3], preserve_luminosity };
+            for (x, y) in run(&a, &px).iter().zip(&px) {
+                for k in 0..3 {
+                    assert!((x[k] - y[k]).abs() < 1e-5, "{x:?} {y:?}");
+                }
+            }
+        }
+        // Shadows and highlights pushed past each other, and values from a hostile file.
+        let a = Adjustment::ColorBalance {
+            shadows: [-100.0, 100.0, f32::NAN],
+            midtones: [1e9, -1e9, 0.0],
+            highlights: [100.0, -100.0, f32::INFINITY],
+            preserve_luminosity: true,
+        };
+        for c in run(&a, &px) {
+            assert!(c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)), "{c:?}");
+        }
     }
 }

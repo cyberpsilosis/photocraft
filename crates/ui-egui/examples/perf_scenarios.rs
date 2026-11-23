@@ -329,12 +329,13 @@ fn main() {
     // A panic in one group (a crash the scenario found) is reported against the row that was
     // running, and the other groups still run.
     type Group = fn(&mut Bench, &Sizes);
-    let groups: [(&str, Group); 5] = [
+    let groups: [(&str, Group); 6] = [
         ("layered", layered_scenarios),
         ("many layers", many_layer_scenarios),
         ("bit depths", depth_scenarios),
         ("long operations", job_scenarios),
         ("algorithms", algorithm_scenarios),
+        ("adjustments", adjustment_scenarios),
     ];
     let use_gpu = b.gpu.is_some();
     for (i, (group, run)) in groups.into_iter().enumerate() {
@@ -830,6 +831,52 @@ fn algorithm_scenarios(b: &mut Bench, sz: &Sizes) {
             let t = Instant::now();
             exec(s, "paint.stroke", json!({"points": [[x, y]], "size": 40, "hardness": 0.8, "color": "#c03020"}))?;
             Ok(ms(t) + b.refresh(s, false)?)
+        });
+    }
+}
+
+/// Adjustment layers on the CPU compositor's path: one `adjust::apply_depth` call per 256 px
+/// tile (`RENDER_TILE`) over the 20 MP layered size, one thread, as `photocraft-cli` renders.
+/// Color Balance first: it runs a power per channel, which per-level tables avoid at 8 and 16
+/// bits.
+fn adjustment_scenarios(b: &mut Bench, sz: &Sizes) {
+    use photocraft_color::SampleType;
+    use photocraft_compose::{Buffer, RENDER_TILE, adjust};
+    use photocraft_doc::Adjustment;
+    use photocraft_geom::Rect;
+
+    let reps = b.reps.min(7);
+    let (w, h) = sz.layered;
+    let (w, h) = (w as i32, h as i32);
+    // The Design Syndrome chrome template's numbers (Preserve Luminosity on).
+    let chrome =
+        Adjustment::ColorBalance { shadows: [-31.0, 17.0, 35.0], midtones: [12.0, 14.0, 5.0], highlights: [1.0, -9.0, 26.0], preserve_luminosity: true };
+    for (bits, depth) in [(8, SampleType::U8), (16, SampleType::U16), (32, SampleType::F32)] {
+        let name = format!("Color Balance on 20 MP, {bits}-bit, per tile (CPU)");
+        if !b.wanted(&name) {
+            continue;
+        }
+        let mut tiles = Vec::new();
+        for y0 in (0..h).step_by(RENDER_TILE as usize) {
+            for x0 in (0..w).step_by(RENDER_TILE as usize) {
+                let rect = Rect::new(x0, y0, (x0 + RENDER_TILE).min(w), (y0 + RENDER_TILE).min(h));
+                let mut t = Buffer::transparent(rect);
+                let tw = rect.width() as i32;
+                for (i, p) in t.px.iter_mut().enumerate() {
+                    let (x, y) = (x0 + i as i32 % tw, y0 + i as i32 / tw);
+                    *p = [x as f32 / w as f32, y as f32 / h as f32, ((x ^ y) & 1023) as f32 / 1023.0, 1.0];
+                }
+                tiles.push(t);
+            }
+        }
+        let mut s = Session::new();
+        b.time(&name, &mut s, reps, true, |_, _, _| {
+            let mut work = tiles.clone();
+            let t = Instant::now();
+            for tile in &mut work {
+                adjust::apply_depth(&chrome, tile, adjust::Transfer::Srgb, Some(depth));
+            }
+            Ok(ms(t))
         });
     }
 }

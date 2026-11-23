@@ -448,3 +448,21 @@ id = "P48"
 title = "Full refresh of a 14000×14000 document"
 bench = "large_image_bench"
 row = "full refresh"
+
+[[scenario]]
+id = "P52"
+title = "Color Balance on 20 MP, 8-bit, one call per 256 px tile (CPU)"
+bench = "perf_scenarios"
+row = "Color Balance on 20 MP, 8-bit, per tile (CPU)"
+
+[[scenario]]
+id = "P53"
+title = "Color Balance on 20 MP, 16-bit, one call per 256 px tile (CPU)"
+bench = "perf_scenarios"
+row = "Color Balance on 20 MP, 16-bit, per tile (CPU)"
+
+[[scenario]]
+id = "P54"
+title = "Color Balance on 20 MP, 32-bit, one call per 256 px tile (CPU)"
+bench = "perf_scenarios"
+row = "Color Balance on 20 MP, 32-bit, per tile (CPU)"
