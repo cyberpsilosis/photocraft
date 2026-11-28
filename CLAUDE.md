@@ -101,8 +101,20 @@ the head commit. Rust stable 1.95 or newer (`rust-version` in `Cargo.toml`).
   review.
 - A separate reviewer reads the whole diff against this file and ends its
   comment with `VERDICT: PASS` or `VERDICT: FAIL`, after the extra checks in
-  the table below. A passed review puts the pull request in front of Elijah.
-- Elijah merges, by hand. No agent merges a pull request here.
+  the table below. The verdict names the full head commit and the review
+  job's own run.
+- The agent that opened the pull request merges it (Elijah, 2026-11-28:
+  "Do the same for orb-shop and photocraft", after sorry-hollywood-media's
+  "Builder merges by itself"; until then he merged every one by hand). It
+  merges only when a separate reviewer's `VERDICT: PASS` names the exact
+  head commit, after that review ran the Linux steps above on it (GitHub
+  runs no CI here, so any check GitHub does show must also be green), and
+  `main` is already in the head. It merges with the head pinned to that
+  commit, so a push after the verdict needs a new one. A `VERDICT: FAIL`
+  stops the merge until a new push answers it. The harness's merge pass
+  (aethernet-ops, `docs/routines/harness-worker.md`) says each step. No one
+  else merges, and a pull request that loosens this rule waits for Elijah
+  to merge it.
 - Say in the pull request what the harness will see change: which commands,
   renders or file outputs differ, and that only Linux was run (GitHub runs no
   macOS or Windows job here).
